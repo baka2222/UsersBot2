@@ -1,0 +1,72 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Главная</a>
+  &rsaquo; <a href="{% url 'admin:simulator_telegramaccount_changelist' %}">Telegram-аккаунты</a>
+  &rsaquo; <a href="{% url 'admin:simulator_telegramaccount_change' account.pk %}">{{ account.title }}</a>
+  &rsaquo; Подключение
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width:560px;">
+  <div style="background:#f8f9fa;border:1px solid #e3e6ea;border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+    <p style="margin:0 0 6px;"><b>Аккаунт:</b> {{ account.title }}{% if account.phone %} — {{ account.phone }}{% endif %}</p>
+    <p style="margin:0;"><b>Текущий статус:</b> {{ account.get_status_display }}</p>
+  </div>
+
+  {% if step == "phone" %}
+    <h2>Шаг 1. Номер телефона</h2>
+    <p style="color:#555;">Введите номер телефона аккаунта. На него в Telegram придёт код подтверждения.</p>
+    <form method="post">
+      {% csrf_token %}
+      {{ phone_form.as_p }}
+      <div style="margin-top:16px;">
+        <button type="submit" class="button" style="background:#28a745;color:#fff;padding:8px 18px;border:none;border-radius:4px;cursor:pointer;">
+          Отправить код
+        </button>
+      </div>
+    </form>
+
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e3e6ea;">
+      <p style="color:#555;margin-bottom:8px;"><b>Код не приходит?</b> Войдите по QR-коду — он не зависит от доставки кода.</p>
+      <a class="button" style="background:#2b6cb0;color:#fff;padding:8px 18px;border-radius:4px;text-decoration:none;"
+         href="{% url 'admin:simulator_telegramaccount_authorize_qr' account.pk %}">
+        Войти по QR-коду
+      </a>
+    </div>
+
+  {% else %}
+    <h2>Шаг 2. Код подтверждения</h2>
+    <p style="color:#555;">
+      Введите код для номера <b>{{ account.phone }}</b>.
+      Если включена двухэтапная проверка — заполните также поле пароля.
+    </p>
+    <div style="background:#fff3cd;border:1px solid #ffe69c;border-radius:8px;padding:12px 16px;margin-bottom:16px;color:#664d03;">
+      <b>Где искать код?</b> Обычно он приходит <b>не по SMS</b>, а в само приложение
+      Telegram — в служебный чат <b>«Telegram»</b> (отправитель с синей галочкой).
+      Откройте Telegram на телефоне или в десктоп-приложении и проверьте этот чат.
+      По SMS код приходит, только если аккаунт больше нигде не залогинен.
+    </div>
+    <form method="post">
+      {% csrf_token %}
+      {{ code_form.as_p }}
+      <div style="margin-top:16px;display:flex;gap:10px;align-items:center;">
+        <button type="submit" class="button" style="background:#28a745;color:#fff;padding:8px 18px;border:none;border-radius:4px;cursor:pointer;">
+          Подтвердить и подключить
+        </button>
+      </div>
+    </form>
+
+    <form method="post" style="margin-top:14px;">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="reset">
+      <button type="submit" class="button" style="background:#6c757d;color:#fff;padding:6px 14px;border:none;border-radius:4px;cursor:pointer;">
+        Начать заново (изменить номер)
+      </button>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

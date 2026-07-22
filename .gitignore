@@ -1,0 +1,29 @@
+# Секреты и локальная конфигурация
+.env
+
+# База данных SQLite (локальная разработка)
+*.sqlite3
+*.sqlite3-*
+
+# Виртуальное окружение
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Рантайм-данные и статика (создаются автоматически)
+/data/
+/staticfiles/
+
+# Логи и сессии Telegram
+*.log
+*.session
+*.session-journal
+
+# Служебные файлы ОС/редакторов
+.DS_Store
+.idea/
+.vscode/

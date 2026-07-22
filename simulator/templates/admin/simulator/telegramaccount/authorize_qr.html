@@ -1,0 +1,76 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrahead %}
+{{ block.super }}
+{% if auto_refresh %}<meta http-equiv="refresh" content="3">{% endif %}
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Главная</a>
+  &rsaquo; <a href="{% url 'admin:simulator_telegramaccount_changelist' %}">Telegram-аккаунты</a>
+  &rsaquo; <a href="{% url 'admin:simulator_telegramaccount_change' account.pk %}">{{ account.title }}</a>
+  &rsaquo; Подключение по QR
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width:560px;">
+  <div style="background:#f8f9fa;border:1px solid #e3e6ea;border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+    <p style="margin:0;"><b>Аккаунт:</b> {{ account.title }}{% if account.phone %} — {{ account.phone }}{% endif %}</p>
+  </div>
+
+  {% if qr_state == "waiting" %}
+    <h2>Отсканируйте QR-код</h2>
+    <ol style="color:#555;line-height:1.6;">
+      <li>Откройте <b>Telegram</b> на телефоне того аккаунта, который подключаете.</li>
+      <li>Меню → <b>Настройки</b> → <b>Устройства</b> → <b>Подключить устройство</b>.</li>
+      <li>Наведите камеру на код ниже.</li>
+    </ol>
+    <div style="text-align:center;margin:20px 0;">
+      <img src="{{ qr_image }}" alt="QR" style="width:280px;height:280px;border:1px solid #e3e6ea;border-radius:8px;">
+    </div>
+    <p style="color:#888;text-align:center;">Ожидание сканирования… страница обновляется автоматически.<br>
+      Код периодически обновляется — это нормально.</p>
+
+  {% elif qr_state == "password" %}
+    <h2>Облачный пароль (2FA)</h2>
+    <p style="color:#555;">На аккаунте включена двухэтапная проверка. Введите облачный пароль.</p>
+    {% if qr_error %}<p style="color:#dc3545;">Ошибка: {{ qr_error }}</p>{% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="password">
+      <p><input type="password" name="password" autofocus style="padding:6px 10px;width:260px;"></p>
+      <button type="submit" class="button" style="background:#28a745;color:#fff;padding:8px 18px;border:none;border-radius:4px;cursor:pointer;">
+        Подтвердить
+      </button>
+    </form>
+
+  {% elif qr_state == "timeout" %}
+    <h2>Время истекло</h2>
+    <p style="color:#555;">QR-код не отсканировали за отведённое время. Начните заново.</p>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="restart">
+      <button type="submit" class="button" style="background:#28a745;color:#fff;padding:8px 18px;border:none;border-radius:4px;cursor:pointer;">
+        Показать новый QR-код
+      </button>
+    </form>
+
+  {% else %}
+    <h2>Не удалось выполнить QR-вход</h2>
+    {% if qr_error %}<p style="color:#dc3545;">{{ qr_error }}</p>{% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="restart">
+      <button type="submit" class="button" style="background:#28a745;color:#fff;padding:8px 18px;border:none;border-radius:4px;cursor:pointer;">
+        Попробовать снова
+      </button>
+    </form>
+  {% endif %}
+
+  <p style="margin-top:24px;">
+    <a href="{% url 'admin:simulator_telegramaccount_authorize' account.pk %}">← Вернуться к входу по номеру и коду</a>
+  </p>
+</div>
+{% endblock %}

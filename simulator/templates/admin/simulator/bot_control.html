@@ -1,0 +1,82 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrahead %}
+{{ block.super }}
+{% if auto_refresh %}<meta http-equiv="refresh" content="5">{% endif %}
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Главная</a> &rsaquo; Запуск бота
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width:760px;">
+
+  <p style="color:#555;">
+    Бот слушает ваши группы и отправляет ответы по сценариям. Включите его кнопкой
+    ниже перед занятием и выключите после. Аккаунты при выключении остаются на связи —
+    просто перестают отвечать.
+  </p>
+
+  {% if running %}
+    <div style="background:#d4edda;border:1px solid #b5dcc0;border-radius:8px;padding:16px 20px;margin:16px 0;">
+      <span style="font-size:18px;">🟢 <b>Бот работает</b> — отвечает по сценариям.</span>
+      <form method="post" action="{% url 'admin:bot_control_stop' %}" style="margin-top:12px;">
+        {% csrf_token %}
+        <button type="submit" class="button"
+                style="background:#dc3545;color:#fff;padding:10px 22px;border:none;border-radius:6px;cursor:pointer;font-size:15px;">
+          ■ Выключить бота
+        </button>
+      </form>
+    </div>
+
+  {% elif is_active and not alive %}
+    <div style="background:#fff3cd;border:1px solid #ffe69c;border-radius:8px;padding:16px 20px;margin:16px 0;">
+      <span style="font-size:18px;">🟠 <b>Бот включён, но фоновый процесс не отвечает.</b></span>
+      <div style="color:#664d03;margin-top:6px;">
+        Проверьте, запущен ли процесс бота: в Docker это контейнер <code>bot</code>
+        (<code>docker compose ps</code>), локально — команда <code>python manage.py run_bot</code>.
+      </div>
+      <form method="post" action="{% url 'admin:bot_control_stop' %}" style="margin-top:12px;">
+        {% csrf_token %}
+        <button type="submit" class="button"
+                style="background:#6c757d;color:#fff;padding:8px 18px;border:none;border-radius:6px;cursor:pointer;">
+          Выключить
+        </button>
+      </form>
+    </div>
+
+  {% else %}
+    <div style="background:#f8d7da;border:1px solid #f1c0c5;border-radius:8px;padding:16px 20px;margin:16px 0;">
+      <span style="font-size:18px;">🔴 <b>Бот выключен</b> — сообщения не отправляются.</span>
+      {% if not alive %}
+      <div style="color:#7d3b41;margin-top:6px;">
+        Фоновый процесс сейчас {% if heartbeat %}не отвечает{% else %}ещё не запускался{% endif %}.
+        Он поднимется автоматически (контейнер <code>bot</code>) — после включения бот начнёт отвечать.
+      </div>
+      {% endif %}
+      <form method="post" action="{% url 'admin:bot_control_start' %}" style="margin-top:12px;">
+        {% csrf_token %}
+        <button type="submit" class="button"
+                style="background:#28a745;color:#fff;padding:10px 22px;border:none;border-radius:6px;cursor:pointer;font-size:15px;">
+          ▶ Запустить бота
+        </button>
+      </form>
+    </div>
+  {% endif %}
+
+  <p style="color:#888;font-size:13px;">
+    Фоновый процесс: {% if alive %}🟢 на связи{% else %}⚪ не в сети{% endif %}{% if heartbeat %} (отклик: {{ heartbeat|date:"H:i:s" }}){% endif %}.
+  </p>
+
+  <h3 style="margin-top:24px;">Журнал запуска</h3>
+  <p style="color:#888;margin-top:0;">
+    Что происходит внутри бота: какие аккаунты подключились, за какими группами он
+    следит, что отправил или почему возникла ошибка. Обновляется автоматически.
+  </p>
+  <pre style="background:#1e1e1e;color:#e6e6e6;padding:14px 16px;border-radius:8px;max-height:420px;overflow:auto;font-size:12.5px;line-height:1.5;">{{ log_text }}</pre>
+
+</div>
+{% endblock %}

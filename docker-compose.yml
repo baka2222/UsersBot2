@@ -1,0 +1,88 @@
+# Боевой запуск: база PostgreSQL, веб-панель за Nginx, бот отдельным контейнером.
+#   docker compose up -d --build
+# Панель: http://localhost:${WEB_PORT} (по умолчанию 8080).
+#
+# Имя проекта закреплено явно (name), а не берётся из имени папки — так контейнеры,
+# тома и сеть никогда не пересекутся с другими проектами на этой машине (например,
+# с AmirCashBot, который использует хостовые порты 80 и 127.0.0.1:5433), даже если
+# папку когда-нибудь переименуют.
+name: usersbot-simulator
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    # Порт наружу не обязателен для работы — только для доступа с хоста (psql/DBeaver).
+    # Привязан к 127.0.0.1 (не наружу) и на порт, отличный от AmirCashBot (5433)
+    # и от обычного локального PostgreSQL (5432).
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATA_DIR: /app/data
+      DJANGO_DEBUG: "False"
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             python manage.py ensure_superuser &&
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+    volumes:
+      - static_data:/app/staticfiles
+      - runtime_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/admin/login/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATA_DIR: /app/data
+      DJANGO_DEBUG: "False"
+    command: python manage.py run_bot
+    volumes:
+      - runtime_data:/app/data
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_data:/app/staticfiles:ro
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  static_data:
+  runtime_data:
