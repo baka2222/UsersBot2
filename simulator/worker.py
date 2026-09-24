@@ -7,7 +7,9 @@
 Запуск:  python manage.py run_bot
 """
 import asyncio
+import mimetypes
 import logging
+from pathlib import Path
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -107,14 +109,24 @@ def load_matching_scenarios(group_id: int, text: str, available_account_ids: set
             if reply.account_id not in available_account_ids:
                 continue
             # Подставляем случайное число вместо {number} в момент срабатывания
-            text_out = reply.render_text()
-            if not text_out.strip():
+            content_type = reply.resolved_content_type
+            text_out = reply.render_text() if content_type != "reaction" else ""
+            reaction = reply.resolved_reaction
+            media = reply.resolved_media
+            if content_type == "text" and not text_out.strip():
+                continue
+            if content_type == "reaction" and not reaction:
+                continue
+            if content_type in ("image", "sticker") and not media:
                 continue
             replies.append({
                 "id": reply.id,
                 "account_id": reply.account_id,
                 "delay": reply.delay_seconds,
                 "text": text_out,
+                "content_type": content_type,
+                "reaction": reaction,
+                "media_path": media.path if media else "",
                 "reply_to_trigger": reply.reply_to_trigger,
             })
         if replies:
@@ -159,7 +171,8 @@ def mark_log_failed(log_id: int, error: str):
 # ----------------------------------------------------------------------------
 @sync_to_async
 def record_message(*, kind, peer_id, account_id, group_id, title, username,
-                   tg_id, sender_id, sender_name, text, date, outgoing):
+                   tg_id, sender_id, sender_name, text, content_type, reaction,
+                   media_name, date, outgoing):
     """Сохраняет одно сообщение в диалог. Диалог заводится автоматически.
 
     Дубликаты (одно и то же сообщение видно нескольким нашим аккаунтам в группе)
@@ -202,6 +215,9 @@ def record_message(*, kind, peer_id, account_id, group_id, title, username,
             sender_id=sender_id,
             sender_name=sender_name or "",
             text=text or "",
+            content_type=content_type,
+            reaction=reaction or "",
+            media=media_name or "",
             date=date,
             status=DialogMessage.Status.SENT,
         )
@@ -212,7 +228,7 @@ def record_message(*, kind, peer_id, account_id, group_id, title, username,
 
     fields = ["last_message_at", "last_text", "last_outgoing"]
     dialog.last_message_at = date or timezone.now()
-    dialog.last_text = (text or "")[:500]
+    dialog.last_text = _content_preview(content_type, text, reaction)
     dialog.last_outgoing = outgoing
     if not outgoing:
         Dialog.objects.filter(pk=dialog.pk).update(unread=F("unread") + 1)
@@ -236,27 +252,57 @@ def load_pending_outgoing():
             "peer_id": m.dialog.peer_id,
             "username": m.dialog.username,
             "text": m.text,
+            "content_type": m.content_type,
+            "reaction": m.reaction,
+            "media_path": m.media.path if m.media else "",
+            "reaction_to_tg_id": m.reaction_to_tg_id,
             "account_id": account_id,
         })
     return items
 
 
 @sync_to_async
-def mark_outgoing_sent(msg_id: int, tg_id: int, date):
+def mark_outgoing_sent(msg_id: int, tg_id: int | None, date):
     msg = DialogMessage.objects.select_related("dialog").filter(pk=msg_id).first()
     if not msg:
         return
     # Наш собственный исходящий апдейт мог быть уже пойман обработчиком событий и
     # сохранён отдельной строкой — убираем дубль, оставляя запись из панели.
-    DialogMessage.objects.filter(
-        dialog_id=msg.dialog_id, tg_id=tg_id,
-    ).exclude(pk=msg_id).delete()
+    if tg_id is not None:
+        DialogMessage.objects.filter(
+            dialog_id=msg.dialog_id, tg_id=tg_id,
+        ).exclude(pk=msg_id).delete()
     DialogMessage.objects.filter(pk=msg_id).update(
         status=DialogMessage.Status.SENT, tg_id=tg_id, date=date, error="",
     )
     Dialog.objects.filter(pk=msg.dialog_id).update(
         last_message_at=date or timezone.now(),
-        last_text=(msg.text or "")[:500],
+        last_text=_content_preview(msg.content_type, msg.text, msg.reaction),
+        last_outgoing=True,
+    )
+
+
+@sync_to_async
+def record_scenario_reaction(*, peer_id: int, account_id: int, reaction: str,
+                             reaction_to_tg_id: int, date):
+    """Реакция не вызывает NewMessage, поэтому сохраняем её в историю явно."""
+    dialog = Dialog.objects.filter(kind=Dialog.Kind.GROUP, peer_id=peer_id).first()
+    if dialog is None:
+        return
+    DialogMessage.objects.create(
+        dialog=dialog,
+        outgoing=True,
+        account_id=account_id,
+        sender_name="",
+        content_type=DialogMessage.ContentType.REACTION,
+        reaction=reaction,
+        reaction_to_tg_id=reaction_to_tg_id,
+        date=date,
+        status=DialogMessage.Status.SENT,
+    )
+    Dialog.objects.filter(pk=dialog.pk).update(
+        last_message_at=date or timezone.now(),
+        last_text=_content_preview(DialogMessage.ContentType.REACTION, "", reaction),
         last_outgoing=True,
     )
 
@@ -266,6 +312,27 @@ def mark_outgoing_failed(msg_id: int, error: str):
     DialogMessage.objects.filter(pk=msg_id).update(
         status=DialogMessage.Status.FAILED, error=error[:2000],
     )
+
+
+def _content_preview(content_type: str, text: str, reaction: str = "") -> str:
+    if content_type == DialogMessage.ContentType.REACTION:
+        return f"Реакция {reaction}"[:500]
+    if content_type == DialogMessage.ContentType.IMAGE:
+        return (text or "[изображение]")[:500]
+    if content_type == DialogMessage.ContentType.STICKER:
+        return "[стикер]"
+    return (text or "")[:500]
+
+
+def _scenario_preview(reply: dict) -> str:
+    content_type = reply["content_type"]
+    if content_type == "reaction":
+        return f"Реакция {reply['reaction']}"
+    if content_type == "image":
+        return reply["text"] or "[изображение]"
+    if content_type == "sticker":
+        return "[стикер]"
+    return reply["text"]
 
 
 # ----------------------------------------------------------------------------
@@ -545,7 +612,7 @@ class SimulationWorker:
                     account_id=reply["account_id"],
                     trigger_text=text,
                     trigger_sender=sender_name,
-                    sent_text=reply["text"],
+                    sent_text=_scenario_preview(reply),
                     scheduled_at=scheduled_at,
                 )
                 task = asyncio.create_task(
@@ -563,10 +630,28 @@ class SimulationWorker:
             if client is None:
                 await mark_log_failed(log_id, "Аккаунт не подключён.")
                 return
-            kwargs = {}
-            if reply["reply_to_trigger"] and trigger_msg_id:
-                kwargs["reply_to"] = trigger_msg_id
-            await client.send_message(chat_id, reply["text"], **kwargs)
+            content_type = reply["content_type"]
+            if content_type == "reaction":
+                # Реакция в Telegram всегда относится к определённому сообщению,
+                # поэтому для сценария это неизменно сообщение-триггер.
+                await self._send_reaction(client, chat_id, trigger_msg_id, reply["reaction"])
+                await record_scenario_reaction(
+                    peer_id=chat_id,
+                    account_id=reply["account_id"],
+                    reaction=reply["reaction"],
+                    reaction_to_tg_id=trigger_msg_id,
+                    date=timezone.now(),
+                )
+            else:
+                kwargs = {}
+                if reply["reply_to_trigger"] and trigger_msg_id:
+                    kwargs["reply_to"] = trigger_msg_id
+                if content_type == "text":
+                    await client.send_message(chat_id, reply["text"], **kwargs)
+                else:
+                    await self._send_media(
+                        client, chat_id, reply["media_path"], content_type, reply["text"], **kwargs,
+                    )
             await mark_log_sent(log_id)
             logger.info("Отправлено по сценарию «%s» (задержка %s с).", scenario_name, reply["delay"])
         except FloodWaitError as exc:
@@ -589,6 +674,45 @@ class SimulationWorker:
             await mark_log_failed(log_id, str(exc))
             logger.error("Ошибка отправки по сценарию «%s»: %s", scenario_name, exc)
 
+    @staticmethod
+    async def _send_reaction(client, target, message_id: int, reaction: str):
+        """Ставит одну emoji-реакцию на уже существующее сообщение."""
+        from telethon.tl.functions.messages import SendReactionRequest
+        from telethon.tl.types import ReactionEmoji
+
+        peer = await client.get_input_entity(target)
+        await client(SendReactionRequest(
+            peer=peer, msg_id=message_id, reaction=[ReactionEmoji(emoticon=reaction)],
+        ))
+
+    @staticmethod
+    async def _send_media(client, target, media_path: str, content_type: str, caption: str = "", **kwargs):
+        """Отправляет фото либо файл со sticker-атрибутом через Telethon."""
+        path = Path(media_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Файл для отправки не найден: {path}")
+        if content_type == DialogMessage.ContentType.IMAGE:
+            return await client.send_file(target, str(path), caption=caption or None, **kwargs)
+
+        from telethon.tl.types import (
+            DocumentAttributeFilename,
+            DocumentAttributeSticker,
+            InputStickerSetEmpty,
+        )
+
+        # Python не знает MIME для .tgs; без него Telegram принимает файл как
+        # обычный документ. Явное сопоставление сохраняет тип стикера.
+        if path.suffix.lower() == ".tgs":
+            mimetypes.add_type("application/x-tgsticker", ".tgs")
+        attributes = [
+            DocumentAttributeFilename(file_name=path.name),
+            DocumentAttributeSticker(alt="", stickerset=InputStickerSetEmpty()),
+        ]
+        return await client.send_file(
+            target, str(path), caption=caption or None, force_document=True,
+            attributes=attributes, **kwargs,
+        )
+
     async def _describe_sender(self, event):
         try:
             sender = await event.get_sender()
@@ -609,9 +733,13 @@ class SimulationWorker:
         peer_id = event.chat_id
         outgoing = bool(event.out)
 
-        # Текст или пометка о вложении, чтобы в панели было видно и медиа-сообщения
+        # Текст, изображение и стикер храним раздельно: это позволяет показать
+        # входящее медиа в панели и не менять старую логику для обычных текстов.
         text = event.raw_text or ""
-        if not text:
+        content_type = self._message_content_type(event.message)
+        reaction = ""
+        media_name = ""
+        if content_type not in (DialogMessage.ContentType.IMAGE, DialogMessage.ContentType.STICKER) and not text:
             if event.message and event.message.media is not None:
                 text = "[вложение]"
             else:
@@ -634,6 +762,11 @@ class SimulationWorker:
         else:
             return
 
+        # Не скачиваем медиа из посторонних групп: в панель попадают только
+        # личные чаты и группы, заведённые в системе.
+        if content_type in (DialogMessage.ContentType.IMAGE, DialogMessage.ContentType.STICKER):
+            media_name = await self._download_incoming_media(event, account_id, content_type)
+
         if outgoing:
             sender_id = None
             sender_name = self.account_titles.get(account_id, "Вы")
@@ -652,9 +785,43 @@ class SimulationWorker:
             sender_id=sender_id,
             sender_name=sender_name,
             text=text,
+            content_type=content_type,
+            reaction=reaction,
+            media_name=media_name,
             date=event.date,
             outgoing=outgoing,
         )
+
+    @staticmethod
+    def _message_content_type(message):
+        if message is None:
+            return DialogMessage.ContentType.TEXT
+        if getattr(message, "sticker", False):
+            return DialogMessage.ContentType.STICKER
+        if getattr(message, "photo", None):
+            return DialogMessage.ContentType.IMAGE
+        mime_type = getattr(getattr(message, "file", None), "mime_type", "") or ""
+        if mime_type.startswith("image/"):
+            return DialogMessage.ContentType.IMAGE
+        return DialogMessage.ContentType.TEXT
+
+    async def _download_incoming_media(self, event, account_id: int, content_type: str) -> str:
+        """Копирует полученное фото/стикер в общий media-каталог для веб-панели."""
+        try:
+            category = "stickers" if content_type == DialogMessage.ContentType.STICKER else "images"
+            destination_dir = (
+                Path(settings.MEDIA_ROOT) / "incoming" / category / str(account_id) / str(event.chat_id)
+            )
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            downloaded = await event.download_media(file=str(destination_dir / str(event.id)))
+            if not downloaded:
+                return ""
+            return str(Path(downloaded).resolve().relative_to(Path(settings.MEDIA_ROOT).resolve())).replace("\\", "/")
+        except Exception as exc:  # noqa: BLE001
+            # Сообщение всё равно появится в переписке с пометкой типа, даже если
+            # Telegram временно не отдал сам файл.
+            logger.warning("Не удалось скачать входящее медиа (%s): %s", event.id, exc)
+            return ""
 
     async def _safe_get_chat(self, event):
         try:
@@ -694,15 +861,29 @@ class SimulationWorker:
             return
         try:
             target = item["peer_id"]
-            try:
-                msg = await client.send_message(target, item["text"])
-            except (ValueError, TypeError):
-                # Сущность ещё не в кеше клиента — пробуем по username
-                if item.get("username"):
-                    msg = await client.send_message(item["username"], item["text"])
-                else:
-                    raise
-            await mark_outgoing_sent(item["id"], msg.id, msg.date)
+            content_type = item["content_type"]
+            if content_type == DialogMessage.ContentType.REACTION:
+                await self._send_reaction(client, target, item["reaction_to_tg_id"], item["reaction"])
+                await mark_outgoing_sent(item["id"], None, timezone.now())
+            else:
+                try:
+                    if content_type == DialogMessage.ContentType.TEXT:
+                        msg = await client.send_message(target, item["text"])
+                    else:
+                        msg = await self._send_media(
+                            client, target, item["media_path"], content_type, item["text"],
+                        )
+                except (ValueError, TypeError):
+                    # Сущность ещё не в кеше клиента — пробуем по username.
+                    if not item.get("username"):
+                        raise
+                    if content_type == DialogMessage.ContentType.TEXT:
+                        msg = await client.send_message(item["username"], item["text"])
+                    else:
+                        msg = await self._send_media(
+                            client, item["username"], item["media_path"], content_type, item["text"],
+                        )
+                await mark_outgoing_sent(item["id"], msg.id, msg.date)
             logger.info("Ответ из панели отправлен (диалог %s).", item["peer_id"])
         except FloodWaitError as exc:
             await mark_outgoing_failed(

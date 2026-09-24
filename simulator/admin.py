@@ -20,6 +20,7 @@ from .models import (
     Scenario,
     ScenarioReply,
     TelegramAccount,
+    validate_media_upload,
 )
 
 admin.site.site_header = "Панель управления"
@@ -375,10 +376,16 @@ class ScenarioReplyInline(nested_admin.NestedStackedInline):
     extra = 1
     fk_name = "scenario"
     verbose_name = "ответ"
-    verbose_name_plural = "Ответы аккаунтов (кто, через сколько секунд и что пишет)"
+    verbose_name_plural = "Ответы аккаунтов (кто, через сколько секунд и что отправляет)"
     fieldsets = (
         (None, {"fields": (("account", "delay_seconds"),)}),
-        ("Что написать", {"fields": ("text", "template")}),
+        ("Что отправить", {
+            "fields": ("content_type", "text", "reaction", "media", "template"),
+            "description": (
+                "Текст работает как прежде. Для реакции укажите emoji; для изображения или стикера "
+                "загрузите файл. Можно выбрать шаблон любого типа — при пустых полях реплики он будет использован целиком."
+            ),
+        }),
         ("Случайные числа в ответе", {
             "classes": ("collapse",),
             "description": NUMBER_HELP,
@@ -509,12 +516,26 @@ class GroupAdmin(nested_admin.NestedModelAdmin):
 # --------------------------------------------------------------------------
 @admin.register(MessageTemplate)
 class MessageTemplateAdmin(admin.ModelAdmin):
-    list_display = ("title", "category", "text_preview")
+    list_display = ("title", "category", "content_type", "content_preview")
     list_filter = ("category",)
-    search_fields = ("title", "text", "category")
+    search_fields = ("title", "text", "reaction", "category")
+    fieldsets = (
+        (None, {"fields": ("title", "category", "content_type")} ),
+        ("Содержимое", {
+            "fields": ("text", "reaction", "media"),
+            "description": (
+                "Для текста заполните текст. Для реакции укажите emoji. Для изображения или стикера загрузите файл; "
+                "текст у изображения может быть подписью."
+            ),
+        }),
+    )
 
-    @admin.display(description="Текст")
-    def text_preview(self, obj):
+    @admin.display(description="Содержимое")
+    def content_preview(self, obj):
+        if obj.content_type == MessageTemplate.ContentType.REACTION:
+            return obj.reaction or "—"
+        if obj.content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER):
+            return obj.media.name.rsplit("/", 1)[-1] if obj.media else "—"
         return (obj.text or "")[:80]
 
 
@@ -662,6 +683,7 @@ class DialogAdmin(admin.ModelAdmin):
             "chat_messages": dialog.messages.all(),
             "is_group": dialog.kind == Dialog.Kind.GROUP,
             "repliers": repliers,
+            "reaction_targets": dialog.messages.filter(outgoing=False, tg_id__isnull=False).order_by("-date", "-id")[:100],
             "can_reply": can_reply,
             "reply_hint": reply_hint,
             "bot_running": bot_running,
@@ -686,10 +708,40 @@ class DialogAdmin(admin.ModelAdmin):
 
     def _handle_reply(self, request, dialog):
         chat_url = reverse("admin:simulator_dialog_chat", args=[dialog.pk])
+        content_type = request.POST.get("content_type") or DialogMessage.ContentType.TEXT
+        allowed_content_types = set(DialogMessage.ContentType.values)
+        if content_type not in allowed_content_types:
+            messages.error(request, "Неизвестный тип ответа.")
+            return redirect(chat_url)
         text = (request.POST.get("text") or "").strip()
-        if not text:
+        reaction = (request.POST.get("reaction") or "").strip()
+        media = request.FILES.get("media")
+        reaction_to_tg_id = None
+        if content_type == DialogMessage.ContentType.TEXT and not text:
             messages.warning(request, "Введите текст ответа.")
             return redirect(chat_url)
+        if content_type == DialogMessage.ContentType.REACTION:
+            if not reaction:
+                messages.warning(request, "Укажите emoji реакции.")
+                return redirect(chat_url)
+            try:
+                reaction_to_tg_id = int(request.POST.get("reaction_to") or 0)
+            except (TypeError, ValueError):
+                reaction_to_tg_id = None
+            if not reaction_to_tg_id or not dialog.messages.filter(
+                outgoing=False, tg_id=reaction_to_tg_id,
+            ).exists():
+                messages.warning(request, "Выберите входящее сообщение, на которое поставить реакцию.")
+                return redirect(chat_url)
+        if content_type in (DialogMessage.ContentType.IMAGE, DialogMessage.ContentType.STICKER) and not media:
+            messages.warning(request, "Загрузите изображение или стикер.")
+            return redirect(chat_url)
+        if media:
+            try:
+                validate_media_upload(media, content_type)
+            except Exception as exc:  # ValidationError is safely shown to the operator.
+                messages.warning(request, f"Файл не принят: {exc}")
+                return redirect(chat_url)
 
         # Определяем, от какого аккаунта отправлять
         if dialog.kind == Dialog.Kind.GROUP:
@@ -717,11 +769,15 @@ class DialogAdmin(admin.ModelAdmin):
             account=account,
             sender_name=account.title,
             text=text,
+            content_type=content_type,
+            reaction=reaction,
+            media=media,
+            reaction_to_tg_id=reaction_to_tg_id,
             date=now,
             status=DialogMessage.Status.PENDING,
         )
         Dialog.objects.filter(pk=dialog.pk).update(
-            last_message_at=now, last_text=text[:500], last_outgoing=True,
+            last_message_at=now, last_text=self._preview_outgoing(content_type, text, reaction), last_outgoing=True,
         )
         if bot_control.status()["running"]:
             messages.success(request, "Ответ поставлен в очередь и будет отправлен через несколько секунд.")
@@ -731,3 +787,13 @@ class DialogAdmin(admin.ModelAdmin):
                 "Ответ сохранён, но бот сейчас выключен — он отправится, как только вы запустите бота.",
             )
         return redirect(chat_url)
+
+    @staticmethod
+    def _preview_outgoing(content_type, text, reaction):
+        if content_type == DialogMessage.ContentType.REACTION:
+            return f"Реакция {reaction}"
+        if content_type == DialogMessage.ContentType.IMAGE:
+            return text or "[изображение]"
+        if content_type == DialogMessage.ContentType.STICKER:
+            return "[стикер]"
+        return text[:500]

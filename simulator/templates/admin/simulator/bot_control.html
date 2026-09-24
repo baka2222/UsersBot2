@@ -1,10 +1,5 @@
 {% extends "admin/base_site.html" %}
 
-{% block extrahead %}
-{{ block.super }}
-{% if auto_refresh %}<meta http-equiv="refresh" content="5">{% endif %}
-{% endblock %}
-
 {% block breadcrumbs %}
 <div class="breadcrumbs">
   <a href="{% url 'admin:index' %}">Главная</a> &rsaquo; Запуск бота
@@ -19,6 +14,14 @@
     ниже перед занятием и выключите после. Аккаунты при выключении остаются на связи —
     просто перестают отвечать.
   </p>
+
+  <label style="display:inline-flex;align-items:center;gap:7px;color:#555;font-size:13px;margin:0 0 14px;">
+    <input type="checkbox" id="terminal-auto-refresh-enabled" checked>
+    Обновлять каждые
+    <input type="number" id="terminal-auto-refresh-seconds" min="3" max="3600" value="5" inputmode="numeric"
+           style="width:58px;padding:4px 6px;border:1px solid #c7d0d9;border-radius:5px;">
+    сек.
+  </label>
 
   {% if running %}
     <div style="background:#d4edda;border:1px solid #b5dcc0;border-radius:8px;padding:16px 20px;margin:16px 0;">
@@ -79,4 +82,35 @@
   <pre style="background:#1e1e1e;color:#e6e6e6;padding:14px 16px;border-radius:8px;max-height:420px;overflow:auto;font-size:12.5px;line-height:1.5;">{{ log_text }}</pre>
 
 </div>
+
+<script>
+  (function () {
+    var storageKey = 'simulator.terminal.autoRefresh';
+    var enabled = document.getElementById('terminal-auto-refresh-enabled');
+    var seconds = document.getElementById('terminal-auto-refresh-seconds');
+    var timer = null;
+    function readSettings() {
+      try { return JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch (ignore) { return null; }
+    }
+    function saveSettings() {
+      localStorage.setItem(storageKey, JSON.stringify({enabled: enabled.checked, seconds: seconds.value}));
+    }
+    function scheduleRefresh() {
+      if (timer) { window.clearTimeout(timer); timer = null; }
+      seconds.disabled = !enabled.checked;
+      if (!enabled.checked) { return; }
+      var delay = Math.max(3, Math.min(3600, parseInt(seconds.value, 10) || 5));
+      seconds.value = delay;
+      timer = window.setTimeout(function () { window.location.reload(); }, delay * 1000);
+    }
+    var saved = readSettings();
+    if (saved) {
+      enabled.checked = saved.enabled !== false;
+      seconds.value = saved.seconds || 5;
+    }
+    enabled.addEventListener('change', function () { saveSettings(); scheduleRefresh(); });
+    seconds.addEventListener('change', function () { saveSettings(); scheduleRefresh(); });
+    scheduleRefresh();
+  })();
+</script>
 {% endblock %}

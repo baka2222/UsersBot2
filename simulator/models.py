@@ -13,6 +13,27 @@
 from django.db import models
 from django.db.models import Q
 from django.conf import settings
+from pathlib import Path
+
+
+MEDIA_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+STICKER_EXTENSIONS = {".webp", ".tgs", ".webm"}
+
+
+def validate_media_upload(uploaded_file, content_type: str) -> None:
+    """Проверка общая для шаблонов, сценариев и отправки из панели."""
+    from django.core.exceptions import ValidationError
+
+    if not uploaded_file:
+        return
+    suffix = Path(uploaded_file.name).suffix.lower()
+    allowed = IMAGE_EXTENSIONS if content_type == "image" else STICKER_EXTENSIONS
+    if suffix not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValidationError(f"Недопустимый формат файла. Разрешены: {allowed_text}.")
+    if getattr(uploaded_file, "size", 0) > MEDIA_MAX_BYTES:
+        raise ValidationError("Размер файла не должен превышать 10 МБ.")
 
 
 class TimeStamped(models.Model):
@@ -161,14 +182,32 @@ class GroupMembership(TimeStamped):
 
 
 class MessageTemplate(TimeStamped):
-    """Библиотека переиспользуемых текстов сообщений."""
+    """Библиотека переиспользуемых ответов для сценариев."""
+
+    class ContentType(models.TextChoices):
+        TEXT = "text", "Текст"
+        REACTION = "reaction", "Реакция"
+        IMAGE = "image", "Изображение"
+        STICKER = "sticker", "Стикер"
 
     title = models.CharField("Название шаблона", max_length=200)
     category = models.CharField(
         "Категория", max_length=100, blank=True,
         help_text="Необязательная группировка, например «Маркетинг».",
     )
-    text = models.TextField("Текст сообщения")
+    content_type = models.CharField(
+        "Тип ответа", max_length=12, choices=ContentType.choices,
+        default=ContentType.TEXT,
+    )
+    text = models.TextField("Текст сообщения / подпись", blank=True)
+    reaction = models.CharField(
+        "Реакция", max_length=32, blank=True,
+        help_text="Emoji, например 👍, ❤️ или 🔥. Реакция ставится на сообщение-триггер.",
+    )
+    media = models.FileField(
+        "Изображение или стикер", upload_to="template_media/%Y/%m/%d", blank=True,
+        help_text="Для изображения загрузите JPG, PNG, WEBP или GIF. Для стикера — WEBP, TGS или WEBM.",
+    )
 
     class Meta:
         verbose_name = "Шаблон сообщения"
@@ -177,6 +216,24 @@ class MessageTemplate(TimeStamped):
 
     def __str__(self):
         return self.title
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        errors = {}
+        if self.content_type == self.ContentType.TEXT and not self.text.strip():
+            errors["text"] = "Для текстового шаблона укажите текст."
+        elif self.content_type == self.ContentType.REACTION and not self.reaction.strip():
+            errors["reaction"] = "Для шаблона-реакции укажите emoji."
+        elif self.content_type in (self.ContentType.IMAGE, self.ContentType.STICKER) and not self.media:
+            errors["media"] = "Для изображения или стикера загрузите файл."
+        elif self.content_type in (self.ContentType.IMAGE, self.ContentType.STICKER):
+            try:
+                validate_media_upload(self.media, self.content_type)
+            except ValidationError as exc:
+                errors["media"] = exc
+        if errors:
+            raise ValidationError(errors)
 
 
 class Scenario(TimeStamped):
@@ -248,12 +305,25 @@ class ScenarioReply(TimeStamped):
         help_text="Можно подставить текст из библиотеки шаблонов вместо ручного ввода. "
                   "Если поле «Текст реплики» заполнено — используется оно, а не шаблон.",
     )
+    content_type = models.CharField(
+        "Тип ответа", max_length=12, choices=MessageTemplate.ContentType.choices,
+        default=MessageTemplate.ContentType.TEXT,
+        help_text="Для текста оставьте «Текст». Для реакции, изображения или стикера заполните соответствующее поле ниже.",
+    )
     text = models.TextField(
         "Текст реплики", blank=True,
         help_text="Что именно напишет аккаунт. Можно подставлять случайные числа: "
                   "напишите диапазон прямо в тексте в фигурных скобках — {от-до}. "
                   "Пример: «Босс, мы получили {50000-200000}$ за {5-30} дней». "
                   "Таких диапазонов может быть сколько угодно, у каждого своё число.",
+    )
+    reaction = models.CharField(
+        "Реакция", max_length=32, blank=True,
+        help_text="Emoji для ответа-реакции на сообщение-триггер.",
+    )
+    media = models.FileField(
+        "Изображение или стикер", upload_to="scenario_media/%Y/%m/%d", blank=True,
+        help_text="Для изображения: JPG, PNG, WEBP или GIF. Для стикера: WEBP, TGS или WEBM.",
     )
 
     # Случайное число вместо {number} — чтобы одинаковые фразы выглядели живее
@@ -300,6 +370,49 @@ class ScenarioReply(TimeStamped):
         if self.template:
             return self.template.text
         return ""
+
+    @property
+    def resolved_content_type(self) -> str:
+        """Явно заданный тип имеет приоритет; текстовый ответ может брать тип из шаблона."""
+        if self.content_type != MessageTemplate.ContentType.TEXT:
+            return self.content_type
+        # Сохраняем старое правило: вручную введённый текст важнее шаблона.
+        if self.text.strip():
+            return MessageTemplate.ContentType.TEXT
+        if self.template:
+            return self.template.content_type
+        return MessageTemplate.ContentType.TEXT
+
+    @property
+    def resolved_reaction(self) -> str:
+        if self.reaction.strip():
+            return self.reaction.strip()
+        return self.template.reaction.strip() if self.template else ""
+
+    @property
+    def resolved_media(self):
+        if self.media:
+            return self.media
+        return self.template.media if self.template else None
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        errors = {}
+        content_type = self.resolved_content_type
+        if content_type == MessageTemplate.ContentType.TEXT and not self.resolved_text.strip():
+            errors["text"] = "Укажите текст реплики или выберите текстовый шаблон."
+        elif content_type == MessageTemplate.ContentType.REACTION and not self.resolved_reaction:
+            errors["reaction"] = "Укажите реакцию или выберите шаблон-реакцию."
+        elif content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER) and not self.resolved_media:
+            errors["media"] = "Загрузите файл или выберите шаблон с файлом."
+        elif content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER):
+            try:
+                validate_media_upload(self.resolved_media, content_type)
+            except ValidationError as exc:
+                errors["media"] = exc
+        if errors:
+            raise ValidationError(errors)
 
     def render_text(self) -> str:
         """Готовый текст к отправке: подставляет случайное число вместо {number}."""
@@ -425,6 +538,12 @@ class DialogMessage(TimeStamped):
         SENT = "sent", "Отправлено"
         FAILED = "failed", "Ошибка"
 
+    class ContentType(models.TextChoices):
+        TEXT = "text", "Текст"
+        REACTION = "reaction", "Реакция"
+        IMAGE = "image", "Изображение"
+        STICKER = "sticker", "Стикер"
+
     dialog = models.ForeignKey(
         Dialog, verbose_name="Диалог", on_delete=models.CASCADE, related_name="messages",
     )
@@ -442,6 +561,16 @@ class DialogMessage(TimeStamped):
     sender_id = models.BigIntegerField("ID автора", null=True, blank=True)
     sender_name = models.CharField("Автор", max_length=255, blank=True)
     text = models.TextField("Текст", blank=True)
+    content_type = models.CharField(
+        "Тип содержимого", max_length=12, choices=ContentType.choices,
+        default=ContentType.TEXT,
+    )
+    reaction = models.CharField("Реакция", max_length=32, blank=True)
+    media = models.FileField("Файл", upload_to="dialog_media/%Y/%m/%d", blank=True)
+    reaction_to_tg_id = models.BigIntegerField(
+        "ID сообщения для реакции", null=True, blank=True,
+        help_text="Служебное поле: реакция всегда привязана к конкретному сообщению Telegram.",
+    )
     date = models.DateTimeField("Время сообщения", null=True, blank=True)
 
     status = models.CharField(
@@ -463,6 +592,11 @@ class DialogMessage(TimeStamped):
     def __str__(self):
         who = "Мы" if self.outgoing else (self.sender_name or "собеседник")
         return f"{who}: {self.text[:40]}"
+
+    @property
+    def media_previewable(self) -> bool:
+        """WEBP-стикеры можно показать прямо в браузере; TGS/WEBM — только открыть."""
+        return bool(self.media and Path(self.media.name).suffix.lower() in IMAGE_EXTENSIONS)
 
 
 class BotState(models.Model):

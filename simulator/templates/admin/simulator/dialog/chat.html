@@ -28,6 +28,14 @@
     Страница обновляется автоматически.
   </p>
 
+  <label style="display:inline-flex;align-items:center;gap:7px;color:#555;font-size:13px;margin:0 0 14px;">
+    <input type="checkbox" id="chat-auto-refresh-enabled" checked>
+    Обновлять каждые
+    <input type="number" id="chat-auto-refresh-seconds" min="3" max="3600" value="6" inputmode="numeric"
+           style="width:58px;padding:4px 6px;border:1px solid #c7d0d9;border-radius:5px;">
+    сек.
+  </label>
+
   {% if not bot_running %}
   <div style="background:#fff3cd;border:1px solid #ffe69c;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#664d03;">
     ⚠ Бот сейчас выключен. Новые входящие не появятся, а ваши ответы отправятся только
@@ -42,7 +50,17 @@
         <div style="display:flex;justify-content:flex-end;margin:6px 0;">
           <div style="max-width:78%;background:#d9fdd3;border:1px solid #b7ebae;border-radius:12px 12px 2px 12px;padding:7px 11px;">
             {% if is_group %}<div style="font-size:11px;color:#128c4b;font-weight:600;">{{ m.sender_name }}</div>{% endif %}
-            <div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>
+            {% if m.content_type == "reaction" %}
+              <div style="font-size:22px;">{{ m.reaction }}</div>
+              <div style="font-size:11px;color:#7a8a99;">Реакция на сообщение #{{ m.reaction_to_tg_id }}</div>
+            {% elif m.content_type == "image" %}
+              {% if m.media %}<a href="{{ m.media.url }}" target="_blank" rel="noopener"><img src="{{ m.media.url }}" alt="Изображение" style="display:block;max-width:100%;max-height:280px;border-radius:7px;margin-bottom:{% if m.text %}6px{% else %}0{% endif %};"></a>{% else %}<div>[изображение]</div>{% endif %}
+              {% if m.text %}<div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>{% endif %}
+            {% elif m.content_type == "sticker" %}
+              {% if m.media %}{% if m.media_previewable %}<a href="{{ m.media.url }}" target="_blank" rel="noopener"><img src="{{ m.media.url }}" alt="Стикер" style="display:block;max-width:180px;max-height:180px;"></a>{% else %}<a href="{{ m.media.url }}" target="_blank" rel="noopener">[стикер: {{ m.media.name|slice:"-60:" }}]</a>{% endif %}{% else %}<div>[стикер]</div>{% endif %}
+            {% else %}
+              <div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>
+            {% endif %}
             <div style="font-size:11px;color:#7a8a99;text-align:right;margin-top:2px;">
               {% if m.status == "pending" %}⏳ отправляется…
               {% elif m.status == "failed" %}<span style="color:#dc3545;">⚠ ошибка{% if m.error %}: {{ m.error }}{% endif %}</span>
@@ -54,7 +72,14 @@
         <div style="display:flex;justify-content:flex-start;margin:6px 0;">
           <div style="max-width:78%;background:#fff;border:1px solid #e1e6eb;border-radius:12px 12px 12px 2px;padding:7px 11px;">
             {% if is_group %}<div style="font-size:11px;color:#2b6cb0;font-weight:600;">{{ m.sender_name }}</div>{% endif %}
-            <div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>
+            {% if m.content_type == "image" %}
+              {% if m.media %}<a href="{{ m.media.url }}" target="_blank" rel="noopener"><img src="{{ m.media.url }}" alt="Изображение" style="display:block;max-width:100%;max-height:280px;border-radius:7px;margin-bottom:{% if m.text %}6px{% else %}0{% endif %};"></a>{% else %}<div>[изображение]</div>{% endif %}
+              {% if m.text %}<div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>{% endif %}
+            {% elif m.content_type == "sticker" %}
+              {% if m.media %}{% if m.media_previewable %}<a href="{{ m.media.url }}" target="_blank" rel="noopener"><img src="{{ m.media.url }}" alt="Стикер" style="display:block;max-width:180px;max-height:180px;"></a>{% else %}<a href="{{ m.media.url }}" target="_blank" rel="noopener">[стикер: {{ m.media.name|slice:"-60:" }}]</a>{% endif %}{% else %}<div>[стикер]</div>{% endif %}
+            {% else %}
+              <div style="white-space:pre-wrap;word-break:break-word;">{{ m.text }}</div>
+            {% endif %}
             <div style="font-size:11px;color:#98a4b0;text-align:right;margin-top:2px;">{{ m.date|date:"d.m H:i" }}</div>
           </div>
         </div>
@@ -65,7 +90,7 @@
   </div>
 
   {% if can_reply %}
-  <form method="post" style="margin-top:12px;">
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
     {% csrf_token %}
     {% if is_group %}
     <div style="margin-bottom:8px;">
@@ -75,7 +100,22 @@
       </select>
     </div>
     {% endif %}
-    <div style="display:flex;gap:8px;align-items:flex-end;">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+      <div style="width:100%;display:flex;gap:8px;align-items:center;">
+        <label style="color:#555;font-size:13px;">Тип:</label>
+        <select name="content_type" id="reply-content-type" style="padding:6px 8px;border:1px solid #c7d0d9;border-radius:6px;">
+          <option value="text">Текст</option>
+          <option value="reaction">Реакция</option>
+          <option value="image">Изображение</option>
+          <option value="sticker">Стикер</option>
+        </select>
+        <input name="reaction" id="reply-reaction" maxlength="32" placeholder="Emoji, например 👍" style="display:none;padding:7px 9px;border:1px solid #c7d0d9;border-radius:6px;">
+        <select name="reaction_to" id="reply-reaction-to" style="display:none;max-width:360px;padding:6px 8px;border:1px solid #c7d0d9;border-radius:6px;">
+          <option value="">На какое сообщение?</option>
+          {% for target in reaction_targets %}<option value="{{ target.tg_id }}">#{{ target.tg_id }} · {{ target.sender_name }}: {{ target.text|default:"[вложение]"|truncatechars:55 }}</option>{% endfor %}
+        </select>
+        <input type="file" name="media" id="reply-media" accept="image/jpeg,image/png,image/gif,image/webp,.tgs,.webm" style="display:none;">
+      </div>
       <textarea name="text" id="reply-text" rows="2" placeholder="Введите ответ…"
                 style="flex:1;padding:9px 11px;border:1px solid #c7d0d9;border-radius:8px;resize:vertical;font-size:14px;"></textarea>
       <button type="submit" class="button"
@@ -96,11 +136,63 @@
   (function () {
     var log = document.getElementById('chat-log');
     if (log) { log.scrollTop = log.scrollHeight; }
-    setInterval(function () {
-      var box = document.getElementById('reply-text');
-      var busy = box && (box === document.activeElement || box.value.trim() !== '');
-      if (!busy) { window.location.reload(); }
-    }, 6000);
+    var kind = document.getElementById('reply-content-type');
+    var text = document.getElementById('reply-text');
+    var reaction = document.getElementById('reply-reaction');
+    var reactionTo = document.getElementById('reply-reaction-to');
+    var media = document.getElementById('reply-media');
+    function updateReplyFields() {
+      if (!kind) { return; }
+      var type = kind.value;
+      var isReaction = type === 'reaction';
+      var isMedia = type === 'image' || type === 'sticker';
+      reaction.style.display = isReaction ? '' : 'none';
+      reactionTo.style.display = isReaction ? '' : 'none';
+      media.style.display = isMedia ? '' : 'none';
+      text.placeholder = type === 'image' ? 'Подпись к изображению (необязательно)…' :
+        (type === 'sticker' ? 'Подпись к стикеру (необязательно)…' : 'Введите ответ…');
+      text.required = type === 'text';
+      reaction.required = isReaction;
+      reactionTo.required = isReaction;
+      media.required = isMedia;
+    }
+    if (kind) { kind.addEventListener('change', updateReplyFields); updateReplyFields(); }
+    var storageKey = 'simulator.chat.autoRefresh';
+    var enabled = document.getElementById('chat-auto-refresh-enabled');
+    var seconds = document.getElementById('chat-auto-refresh-seconds');
+    var timer = null;
+    var hasDraft = false;
+    var replyForm = document.querySelector('#reply-text') && document.querySelector('#reply-text').closest('form');
+    if (replyForm) {
+      replyForm.addEventListener('input', function () { hasDraft = true; });
+      replyForm.addEventListener('change', function () { hasDraft = true; });
+      replyForm.addEventListener('submit', function () { hasDraft = false; });
+    }
+    function readSettings() {
+      try { return JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch (ignore) { return null; }
+    }
+    function saveSettings() {
+      localStorage.setItem(storageKey, JSON.stringify({enabled: enabled.checked, seconds: seconds.value}));
+    }
+    function scheduleRefresh() {
+      if (timer) { window.clearTimeout(timer); timer = null; }
+      seconds.disabled = !enabled.checked;
+      if (!enabled.checked) { return; }
+      var delay = Math.max(3, Math.min(3600, parseInt(seconds.value, 10) || 6));
+      seconds.value = delay;
+      timer = window.setTimeout(function () {
+        // Never reset a message, media upload, or selected reaction target in progress.
+        if (!hasDraft) { window.location.reload(); }
+      }, delay * 1000);
+    }
+    var saved = readSettings();
+    if (saved) {
+      enabled.checked = saved.enabled !== false;
+      seconds.value = saved.seconds || 6;
+    }
+    enabled.addEventListener('change', function () { saveSettings(); scheduleRefresh(); });
+    seconds.addEventListener('change', function () { saveSettings(); scheduleRefresh(); });
+    scheduleRefresh();
   })();
 </script>
 {% endblock %}

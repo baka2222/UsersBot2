@@ -151,6 +151,8 @@ TELEGRAM_PROXY_PASS = os.getenv("TELEGRAM_PROXY_PASS", "")
 # Каталог для рантайм-данных (лог бота). В Docker — общий том между web и bot.
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 BOT_LOG_FILE = DATA_DIR / "bot.log"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = DATA_DIR / "media"
 
 # --- Логирование: диагностические сообщения simulator.* видно в консоли ---
 # (полезно, например, чтобы увидеть сырой ответ Telegram при отправке кода входа)
