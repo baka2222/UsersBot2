@@ -102,19 +102,13 @@
     {% endif %}
     <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
       <div style="width:100%;display:flex;gap:8px;align-items:center;">
-        <label style="color:#555;font-size:13px;">Тип:</label>
-        <select name="content_type" id="reply-content-type" style="padding:6px 8px;border:1px solid #c7d0d9;border-radius:6px;">
-          <option value="text">Текст</option>
-          <option value="reaction">Реакция</option>
-          <option value="image">Изображение</option>
-          <option value="sticker">Стикер</option>
-        </select>
-        <input name="reaction" id="reply-reaction" maxlength="32" placeholder="Emoji, например 👍" style="display:none;padding:7px 9px;border:1px solid #c7d0d9;border-radius:6px;">
-        <select name="reaction_to" id="reply-reaction-to" style="display:none;max-width:360px;padding:6px 8px;border:1px solid #c7d0d9;border-radius:6px;">
-          <option value="">На какое сообщение?</option>
+        <label style="color:#555;font-size:13px;">Действия (будут отправлены в порядке: реакция → фото → текст → стикер):</label>
+        <input name="reaction" id="reply-reaction" maxlength="32" placeholder="Emoji (реакция), например 👍" style="padding:7px 9px;border:1px solid #c7d0d9;border-radius:6px;">
+        <select name="reaction_to" id="reply-reaction-to" style="max-width:360px;padding:6px 8px;border:1px solid #c7d0d9;border-radius:6px;">
+          <option value="">На какое сообщение? (опционально)</option>
           {% for target in reaction_targets %}<option value="{{ target.tg_id }}">#{{ target.tg_id }} · {{ target.sender_name }}: {{ target.text|default:"[вложение]"|truncatechars:55 }}</option>{% endfor %}
         </select>
-        <input type="file" name="media" id="reply-media" accept="image/jpeg,image/png,image/gif,image/webp,.tgs,.webm" style="display:none;">
+        <input type="file" name="media" id="reply-media" accept="image/jpeg,image/png,image/gif,image/webp,.tgs,.webm" style="">
       </div>
       <textarea name="text" id="reply-text" rows="2" placeholder="Введите ответ…"
                 style="flex:1;padding:9px 11px;border:1px solid #c7d0d9;border-radius:8px;resize:vertical;font-size:14px;"></textarea>

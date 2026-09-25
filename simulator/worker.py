@@ -108,27 +108,25 @@ def load_matching_scenarios(group_id: int, text: str, available_account_ids: set
                 continue
             if reply.account_id not in available_account_ids:
                 continue
-            # Подставляем случайное число вместо {number} в момент срабатывания
-            content_type = reply.resolved_content_type
-            # У реакции может быть и текст: это один ответ сценария, в котором
-            # аккаунт сначала ставит реакцию, а затем пишет сообщение.
-            text_out = reply.render_text()
-            reaction = reply.resolved_reaction
-            media = reply.resolved_media
-            if content_type == "text" and not text_out.strip():
-                continue
-            if content_type == "reaction" and not reaction:
-                continue
-            if content_type in ("image", "sticker") and not media:
+            # Одна карточка сценария может содержать несколько действий.
+            actions = []
+            for action in reply.render_actions():
+                item = {"kind": action["kind"]}
+                if action["kind"] == "reaction":
+                    item["reaction"] = action["reaction"]
+                elif action["kind"] == "text":
+                    item["text"] = action["text"]
+                else:
+                    item["media_path"] = action["media"].path
+                    item["caption"] = action.get("caption", "")
+                actions.append(item)
+            if not actions:
                 continue
             replies.append({
                 "id": reply.id,
                 "account_id": reply.account_id,
                 "delay": reply.delay_seconds,
-                "text": text_out,
-                "content_type": content_type,
-                "reaction": reaction,
-                "media_path": media.path if media else "",
+                "actions": actions,
                 "reply_to_trigger": reply.reply_to_trigger,
             })
         if replies:
@@ -327,15 +325,17 @@ def _content_preview(content_type: str, text: str, reaction: str = "") -> str:
 
 
 def _scenario_preview(reply: dict) -> str:
-    content_type = reply["content_type"]
-    if content_type == "reaction":
-        suffix = f" + {reply['text']}" if reply["text"] else ""
-        return f"Реакция {reply['reaction']}{suffix}"
-    if content_type == "image":
-        return reply["text"] or "[изображение]"
-    if content_type == "sticker":
-        return "[стикер]"
-    return reply["text"]
+    labels = []
+    for action in reply["actions"]:
+        if action["kind"] == "reaction":
+            labels.append(f"Реакция {action['reaction']}")
+        elif action["kind"] == "text":
+            labels.append(action["text"])
+        elif action["kind"] == "image":
+            labels.append("[изображение]")
+        else:
+            labels.append("[стикер]")
+    return " → ".join(labels)
 
 
 # ----------------------------------------------------------------------------
@@ -633,34 +633,25 @@ class SimulationWorker:
             if client is None:
                 await mark_log_failed(log_id, "Аккаунт не подключён.")
                 return
-            content_type = reply["content_type"]
-            if content_type == "reaction":
-                # Реакция в Telegram всегда относится к определённому сообщению,
-                # поэтому для сценария это неизменно сообщение-триггер.
-                await self._send_reaction(client, chat_id, trigger_msg_id, reply["reaction"])
-                await record_scenario_reaction(
-                    peer_id=chat_id,
-                    account_id=reply["account_id"],
-                    reaction=reply["reaction"],
-                    reaction_to_tg_id=trigger_msg_id,
-                    date=timezone.now(),
-                )
-                # Текст в той же реплике — продолжение реакции от того же
-                # аккаунта. Это избавляет оператора от второй вложенной строки.
-                if reply["text"].strip():
-                    kwargs = {}
-                    if reply["reply_to_trigger"] and trigger_msg_id:
-                        kwargs["reply_to"] = trigger_msg_id
-                    await client.send_message(chat_id, reply["text"], **kwargs)
-            else:
+            for action in reply["actions"]:
                 kwargs = {}
                 if reply["reply_to_trigger"] and trigger_msg_id:
                     kwargs["reply_to"] = trigger_msg_id
-                if content_type == "text":
-                    await client.send_message(chat_id, reply["text"], **kwargs)
+                if action["kind"] == "reaction":
+                    # Реакция всегда относится к сообщению-триггеру.
+                    await self._send_reaction(client, chat_id, trigger_msg_id, action["reaction"])
+                    await record_scenario_reaction(
+                        peer_id=chat_id,
+                        account_id=reply["account_id"],
+                        reaction=action["reaction"],
+                        reaction_to_tg_id=trigger_msg_id,
+                        date=timezone.now(),
+                    )
+                elif action["kind"] == "text":
+                    await client.send_message(chat_id, action["text"], **kwargs)
                 else:
                     await self._send_media(
-                        client, chat_id, reply["media_path"], content_type, reply["text"], **kwargs,
+                        client, chat_id, action["media_path"], action["kind"], action.get("caption", ""), **kwargs,
                     )
             await mark_log_sent(log_id)
             logger.info("Отправлено по сценарию «%s» (задержка %s с).", scenario_name, reply["delay"])

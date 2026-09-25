@@ -325,6 +325,35 @@ class ScenarioReply(TimeStamped):
         "Изображение или стикер", upload_to="scenario_media/%Y/%m/%d", blank=True,
         help_text="Для изображения: JPG, PNG, WEBP или GIF. Для стикера: WEBP, TGS или WEBM.",
     )
+    # Новые раздельные поля. `content_type` и `media` выше оставлены для уже
+    # созданных сценариев, чтобы их не пришлось переносить вручную.
+    image = models.FileField(
+        "Изображение", upload_to="scenario_images/%Y/%m/%d", blank=True,
+        help_text="Необязательно. JPG, PNG, WEBP или GIF.",
+    )
+    sticker = models.FileField(
+        "Стикер", upload_to="scenario_stickers/%Y/%m/%d", blank=True,
+        help_text="Необязательно. WEBP, TGS или WEBM.",
+    )
+
+    class ActionOrder(models.IntegerChoices):
+        FIRST = 1, "1 — первым"
+        SECOND = 2, "2 — вторым"
+        THIRD = 3, "3 — третьим"
+        FOURTH = 4, "4 — четвёртым"
+
+    reaction_order = models.PositiveSmallIntegerField(
+        "Порядок реакции", choices=ActionOrder.choices, default=ActionOrder.FIRST,
+    )
+    image_order = models.PositiveSmallIntegerField(
+        "Порядок изображения", choices=ActionOrder.choices, default=ActionOrder.SECOND,
+    )
+    text_order = models.PositiveSmallIntegerField(
+        "Порядок текста", choices=ActionOrder.choices, default=ActionOrder.THIRD,
+    )
+    sticker_order = models.PositiveSmallIntegerField(
+        "Порядок стикера", choices=ActionOrder.choices, default=ActionOrder.FOURTH,
+    )
 
     # Случайное число вместо {number} — чтобы одинаковые фразы выглядели живее
     number_min = models.IntegerField(
@@ -395,20 +424,70 @@ class ScenarioReply(TimeStamped):
             return self.media
         return self.template.media if self.template else None
 
+    def render_actions(self) -> list[dict]:
+        """Готовит все заполненные действия одной реплики в нужном порядке.
+
+        Новые карточки не требуют выбрать тип действия. Старые записи с
+        `content_type`/`media` по-прежнему преобразуются в одно действие, чтобы
+        после обновления не поменять их поведение.
+        """
+        text = self.render_text()
+        reaction = self.resolved_reaction
+        template_type = self.template.content_type if self.template else None
+        legacy_media_type = self.content_type if self.content_type in {
+            MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER,
+        } else None
+
+        image = self.image or (
+            self.template.media if template_type == MessageTemplate.ContentType.IMAGE else None
+        )
+        sticker = self.sticker or (
+            self.template.media if template_type == MessageTemplate.ContentType.STICKER else None
+        )
+        # Сценарии, созданные до раздельных полей, отправляем по-старому.
+        if not image and legacy_media_type == MessageTemplate.ContentType.IMAGE:
+            image = self.media
+        if not sticker and legacy_media_type == MessageTemplate.ContentType.STICKER:
+            sticker = self.media
+
+        actions = []
+        if reaction:
+            actions.append({"kind": "reaction", "reaction": reaction, "order": self.reaction_order, "tie": 1})
+        if image:
+            actions.append({"kind": "image", "media": image, "order": self.image_order, "tie": 2})
+        # В старом ответе с единственным фото/стикером текст являлся подписью.
+        # В новой карточке текст — отдельное действие после медиа.
+        legacy_caption = bool(legacy_media_type and not self.image and not self.sticker)
+        if text and not legacy_caption:
+            actions.append({"kind": "text", "text": text, "order": self.text_order, "tie": 3})
+        if sticker:
+            actions.append({"kind": "sticker", "media": sticker, "order": self.sticker_order, "tie": 4})
+        if text and legacy_caption:
+            media_kind = "image" if image else "sticker"
+            for action in actions:
+                if action["kind"] == media_kind:
+                    action["caption"] = text
+                    break
+        return sorted(actions, key=lambda action: (action["order"], action["tie"]))
+
     def clean(self):
         from django.core.exceptions import ValidationError
 
         errors = {}
-        content_type = self.resolved_content_type
-        if content_type == MessageTemplate.ContentType.TEXT and not self.resolved_text.strip():
-            errors["text"] = "Укажите текст реплики или выберите текстовый шаблон."
-        elif content_type == MessageTemplate.ContentType.REACTION and not self.resolved_reaction:
-            errors["reaction"] = "Укажите реакцию или выберите шаблон-реакцию."
-        elif content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER) and not self.resolved_media:
-            errors["media"] = "Загрузите файл или выберите шаблон с файлом."
-        elif content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER):
+        if not self.render_actions():
+            errors["text"] = "Заполните хотя бы одно действие: реакцию, изображение, текст, стикер или шаблон."
+        for field_name, content_type in (("image", MessageTemplate.ContentType.IMAGE),
+                                         ("sticker", MessageTemplate.ContentType.STICKER)):
+            uploaded = getattr(self, field_name)
+            if uploaded:
+                try:
+                    validate_media_upload(uploaded, content_type)
+                except ValidationError as exc:
+                    errors[field_name] = exc
+        # Валидация старого универсального поля — только для существующих записей.
+        if self.media and self.content_type in (MessageTemplate.ContentType.IMAGE, MessageTemplate.ContentType.STICKER):
             try:
-                validate_media_upload(self.resolved_media, content_type)
+                validate_media_upload(self.media, self.content_type)
             except ValidationError as exc:
                 errors["media"] = exc
         if errors:

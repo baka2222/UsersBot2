@@ -379,14 +379,18 @@ class ScenarioReplyInline(nested_admin.NestedStackedInline):
     verbose_name_plural = "Ответы аккаунтов (кто, через сколько секунд и что отправляет)"
     fieldsets = (
         (None, {"fields": (("account", "delay_seconds"),)}),
-        ("Что отправить", {
-            "fields": ("content_type", "text", "reaction", "media", "template"),
+        ("Что сделать", {
+            "fields": ("reaction", "image", "text", "sticker", "template"),
             "description": (
-                "Текст работает как прежде. Для реакции укажите emoji; для изображения или стикера "
-                "загрузите файл. У реакции можно заполнить и «Текст реплики»: аккаунт сначала поставит реакцию, "
-                "а затем отправит этот текст — второй ответ создавать не нужно. Можно выбрать шаблон любого типа "
-                "— при пустых полях реплики он будет использован целиком."
+                "Заполните любые нужные поля в одной карточке. По умолчанию аккаунт выполнит их так: "
+                "реакция → изображение → текст → стикер. Можно заполнить только одно поле. "
+                "Для старых сценариев выбранный шаблон продолжает работать как раньше."
             ),
+        }),
+        ("Порядок действий (необязательно)", {
+            "classes": ("collapse",),
+            "description": "Если порядок по умолчанию не подходит, задайте позицию каждому заполненному действию. При одинаковой позиции порядок остаётся: реакция, изображение, текст, стикер.",
+            "fields": (("reaction_order", "image_order"), ("text_order", "sticker_order")),
         }),
         ("Случайные числа в ответе", {
             "classes": ("collapse",),
@@ -710,38 +714,30 @@ class DialogAdmin(admin.ModelAdmin):
 
     def _handle_reply(self, request, dialog):
         chat_url = reverse("admin:simulator_dialog_chat", args=[dialog.pk])
-        content_type = request.POST.get("content_type") or DialogMessage.ContentType.TEXT
-        allowed_content_types = set(DialogMessage.ContentType.values)
-        if content_type not in allowed_content_types:
-            messages.error(request, "Неизвестный тип ответа.")
-            return redirect(chat_url)
+        # New simplified UI: admin can fill reaction, media and text. We'll enqueue actions
+        # in the order reaction -> image (media) -> text -> sticker (not supported via panel upload separately).
         text = (request.POST.get("text") or "").strip()
         reaction = (request.POST.get("reaction") or "").strip()
         media = request.FILES.get("media")
         reaction_to_tg_id = None
-        if content_type == DialogMessage.ContentType.TEXT and not text:
-            messages.warning(request, "Введите текст ответа.")
-            return redirect(chat_url)
-        if content_type == DialogMessage.ContentType.REACTION:
-            if not reaction:
-                messages.warning(request, "Укажите emoji реакции.")
-                return redirect(chat_url)
+        # If reaction provided, validate target selection
+        if reaction:
             try:
                 reaction_to_tg_id = int(request.POST.get("reaction_to") or 0)
             except (TypeError, ValueError):
                 reaction_to_tg_id = None
-            if not reaction_to_tg_id or not dialog.messages.filter(
-                outgoing=False, tg_id=reaction_to_tg_id,
-            ).exists():
+            if not reaction_to_tg_id or not dialog.messages.filter(outgoing=False, tg_id=reaction_to_tg_id).exists():
                 messages.warning(request, "Выберите входящее сообщение, на которое поставить реакцию.")
                 return redirect(chat_url)
-        if content_type in (DialogMessage.ContentType.IMAGE, DialogMessage.ContentType.STICKER) and not media:
-            messages.warning(request, "Загрузите изображение или стикер.")
+        # If no content at all provided, warn
+        if not (reaction or media or text):
+            messages.warning(request, "Заполните хотя бы одно поле: реакцию, фото или текст.")
             return redirect(chat_url)
+        # Validate media if present (we treat uploaded file as image)
         if media:
             try:
-                validate_media_upload(media, content_type)
-            except Exception as exc:  # ValidationError is safely shown to the operator.
+                validate_media_upload(media, DialogMessage.ContentType.IMAGE)
+            except Exception as exc:
                 messages.warning(request, f"Файл не принят: {exc}")
                 return redirect(chat_url)
 
@@ -764,22 +760,63 @@ class DialogAdmin(admin.ModelAdmin):
                 return redirect(chat_url)
 
         now = timezone.now()
-        DialogMessage.objects.create(
-            dialog=dialog,
-            outgoing=True,
-            via_panel=True,
-            account=account,
-            sender_name=account.title,
-            text=text,
-            content_type=content_type,
-            reaction=reaction,
-            media=media,
-            reaction_to_tg_id=reaction_to_tg_id,
-            date=now,
-            status=DialogMessage.Status.PENDING,
-        )
+        # Enqueue actions in order: reaction, image, text. Each becomes its own DialogMessage row
+        created_any = False
+        if reaction:
+            DialogMessage.objects.create(
+                dialog=dialog,
+                outgoing=True,
+                via_panel=True,
+                account=account,
+                sender_name=account.title,
+                text="",
+                content_type=DialogMessage.ContentType.REACTION,
+                reaction=reaction,
+                media=None,
+                reaction_to_tg_id=reaction_to_tg_id,
+                date=now,
+                status=DialogMessage.Status.PENDING,
+            )
+            created_any = True
+        if media:
+            DialogMessage.objects.create(
+                dialog=dialog,
+                outgoing=True,
+                via_panel=True,
+                account=account,
+                sender_name=account.title,
+                text=text if text else "",
+                content_type=DialogMessage.ContentType.IMAGE,
+                reaction="",
+                media=media,
+                reaction_to_tg_id=None,
+                date=now,
+                status=DialogMessage.Status.PENDING,
+            )
+            created_any = True
+            # Clear text after attaching as caption to image so we don't send duplicate text message
+            text = ""
+        if text:
+            DialogMessage.objects.create(
+                dialog=dialog,
+                outgoing=True,
+                via_panel=True,
+                account=account,
+                sender_name=account.title,
+                text=text,
+                content_type=DialogMessage.ContentType.TEXT,
+                reaction="",
+                media=None,
+                reaction_to_tg_id=None,
+                date=now,
+                status=DialogMessage.Status.PENDING,
+            )
+            created_any = True
+        if not created_any:
+            messages.warning(request, "Не удалось создать сообщение.")
+            return redirect(chat_url)
         Dialog.objects.filter(pk=dialog.pk).update(
-            last_message_at=now, last_text=self._preview_outgoing(content_type, text, reaction), last_outgoing=True,
+            last_message_at=now, last_text=self._preview_outgoing(DialogMessage.ContentType.TEXT if text else (DialogMessage.ContentType.IMAGE if media else DialogMessage.ContentType.REACTION), text, reaction), last_outgoing=True,
         )
         if bot_control.status()["running"]:
             messages.success(request, "Ответ поставлен в очередь и будет отправлен через несколько секунд.")
